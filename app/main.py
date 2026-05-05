@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from typing import Callable
+from collections.abc import Callable
 
 
 def parse_tokens(raw_args: str) -> list[str]:
@@ -74,16 +74,27 @@ def parse_tokens(raw_args: str) -> list[str]:
     return arg_list
 
 
-def extract_stdout_redirection(args: list[str]) -> tuple[list[str], str | None]:
-    stdout_redirection_tokens: list[str] = ["1>", ">"]
+def extract_redirection(
+    args: list[str],
+) -> tuple[list[str], dict[str | None, str | None]]:
+
+    stdout_redirect_tokens: list[str] = ["1>", ">"]
+    stderr_redirect_tokens: list[str] = ["2>"]
     result_args: list[str] = []
-    stdout_file: str | None = None
+    redirection_type: str | None = None
+    redirection_file: str | None = None
+    redirection_info: dict[str | None, str | None] = {}
 
     for idx, arg in enumerate(args):
-        if arg not in stdout_redirection_tokens:
+        if arg not in stdout_redirect_tokens and arg not in stderr_redirect_tokens:
             if idx != 0:
-                if args[idx - 1] in stdout_redirection_tokens:
-                    stdout_file: str = arg
+                if args[idx - 1] in stdout_redirect_tokens:
+                    redirection_type = "stdout"
+                    redirection_file = arg
+                    break
+                elif args[idx - 1] in stderr_redirect_tokens:
+                    redirection_type = "stderr"
+                    redirection_file = arg
                     break
                 else:
                     result_args.append(arg)
@@ -92,7 +103,9 @@ def extract_stdout_redirection(args: list[str]) -> tuple[list[str], str | None]:
         else:
             continue
 
-    return (result_args, stdout_file)
+    redirection_info[redirection_type] = redirection_file
+
+    return (result_args, redirection_info)
 
 
 def is_executable_path(path_dirs: list[str], executable: str) -> bool:
@@ -108,67 +121,87 @@ def is_executable_path(path_dirs: list[str], executable: str) -> bool:
 
 def main() -> None:
 
-    def builtin_echo(args: list[str], stdout_file: str | None) -> None:
-        if stdout_file:
-            with open(stdout_file, "w") as file:
-                file.write(" ".join(args) + "\n")
+    def output(
+        message: str,
+        stream: str,
+        redirect_type: str | None,
+        redirect_path: str | None,
+    ) -> None:
+        out = sys.stderr if stream == "stderr" else sys.stdout
+        if redirect_type == stream and redirect_path:
+            with open(redirect_path, "w") as f:
+                print(message, file=f)
         else:
-            print(" ".join(args))
+            print(message, file=out)
 
-    def builtin_type(args: list[str], stdout_file: str | None) -> None:
-        if args:
-            arg1: str = args[0]
+    def builtin_echo(
+        args: list[str], redirection: tuple[str | None, str | None]
+    ) -> None:
 
-            if arg1 in BUILTINS.keys():
-                if stdout_file:
-                    with open(stdout_file, "w") as file:
-                        file.write(f"{arg1} is a shell builtin\n")
-                else:
-                    print(f"{arg1} is a shell builtin")
+        redirect_type, redirect_path = redirection
 
-            else:
-                found: bool = False
+        output(" ".join(args), "stdout", redirect_type, redirect_path)
 
-                for path_dir in path_dirs:
-                    full_path: str = os.path.join(path_dir, " ".join(args))
+        if redirect_type == "stderr" and redirect_path:
+            with open(redirect_path, "w"):
+                pass
 
-                    if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
-                        if stdout_file:
-                            with open(stdout_file, "w") as file:
-                                file.write(f"{arg1} is {full_path}\n")
-                                break
-                        else:
-                            print(f"{arg1} is {full_path}")
-                            found = True
-                            break
+    def builtin_type(
+        args: list[str], redirection: tuple[str | None, str | None]
+    ) -> None:
 
-                if not found:
-                    print(f"{arg1}: not found")
-        else:
-            print("type: no argument given")
+        redirect_type, redirect_path = redirection
 
-    def builtin_pwd(args: list[str], stdout_file: str | None) -> None:
-        pwd_path: str = os.getcwd()
-        if stdout_file:
-            with open(stdout_file, "w") as file:
-                file.write(pwd_path)
-        else:
-            print(pwd_path)
+        if not args:
+            output("type: no argument given", "stderr", redirect_type, redirect_path)
+            return
 
-    def builtin_cd(args: list[str], stdout_file: str | None) -> None:
+        arg1: str = args[0]
+
+        if arg1 in BUILTINS:
+            output(f"{arg1} is a shell builtin", "stdout", redirect_type, redirect_path)
+            return
+
+        for path_dir in path_dirs:
+            full_path: str = os.path.join(path_dir, " ".join(args))
+
+            if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+                output(f"{arg1} is {full_path}", "stdout", redirect_type, redirect_path)
+                return
+
+        output(f"{arg1}: not found", "stderr", redirect_type, redirect_path)
+
+    def builtin_pwd(
+        args: list[str], redirection: tuple[str | None, str | None]
+    ) -> None:
+
+        redirect_type, redirect_path = redirection
+        output(os.getcwd(), "stdout", redirect_type, redirect_path)
+
+    def builtin_cd(args: list[str], redirection: tuple[str | None, str | None]) -> None:
+
+        redirect_type, redirect_path = redirection
+
         if args:
             new_dir: str = args[0]
             if new_dir == "~":
                 os.chdir(os.path.expanduser("~"))
             elif not os.path.exists(new_dir) and new_dir != "~":
-                print(f"cd: {new_dir}: No such file or directory")
+                output(
+                    f"cd: {new_dir}: No such file or directory",
+                    "stderr",
+                    redirect_type,
+                    redirect_path,
+                )
             else:
                 os.chdir(new_dir)
 
-    def builtin_exit(args: list[str], stdout_file: str | None) -> None:
+    def builtin_exit(
+        args: list[str], redirection: tuple[str | None, str | None]
+    ) -> None:
         sys.exit()
 
-    BUILTINS: dict[str, Callable[[list[str], str | None], None]] = {
+    BUILTINS: dict[str, Callable[[list[str], tuple[str | None, str | None]], None]] = {
         "echo": builtin_echo,
         "exit": builtin_exit,
         "type": builtin_type,
@@ -193,21 +226,34 @@ def main() -> None:
         command: str = tokens[0]
         raw_args: list[str] = tokens[1:]
 
-        args, stdout_file = extract_stdout_redirection(raw_args)
+        args, redirection_info = extract_redirection(raw_args)
+
+        redirection: tuple[str | None, str | None] = next(
+            iter(redirection_info.items()), (None, None)
+        )
+
+        redirect_type, redirect_path = redirection
 
         if command in BUILTINS:
-            BUILTINS[command](args, stdout_file)
+            BUILTINS[command](args, redirection)
 
         else:
-            if command not in BUILTINS:
-                if is_executable_path(path_dirs, command):
-                    if stdout_file:
-                        with open(stdout_file, "w") as file:
-                            subprocess.run([command] + args, stdout=file)
-                    else:
-                        subprocess.run([command] + args)
+            if is_executable_path(path_dirs, command):
+                if redirect_type == "stdout" and redirect_path:
+                    with open(redirect_path, "w") as file:
+                        subprocess.run([command] + args, stdout=file)
+                elif redirect_type == "stderr" and redirect_path:
+                    with open(redirect_path, "w") as file:
+                        subprocess.run([command] + args, stderr=file)
                 else:
-                    print(f"{command}: command not found")
+                    subprocess.run([command] + args)
+            else:
+                output(
+                    f"{command}: command not found",
+                    "stderr",
+                    redirect_type,
+                    redirect_path,
+                )
     return
 
 
